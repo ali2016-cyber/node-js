@@ -1,0 +1,301 @@
+<!DOCTYPE html>
+<html lang="ar">
+
+<head>
+  <meta charset="utf-8" />
+  <title>خريطة OSM</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+
+  <!-- ربط Leaflet محليًا -->
+  <link rel="stylesheet" href="leaflet/leaflet.css" />
+
+  <style>
+    html,
+    body {
+      height: 100%;
+      margin: 0;
+      font-family: Arial, sans-serif;
+    }
+
+    #map {
+      height: 100%;
+      width: 100%;
+    }
+
+    #accuracy-badge {
+      position: fixed;
+      top: 12px;
+      right: 12px;
+      z-index: 9999;
+      background: rgba(0, 0, 0, 0.75);
+      color: white;
+      padding: 8px 14px;
+      border-radius: 20px;
+      font-size: 13px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      box-shadow: 0 2px 8px rgba(0, 0, 0, 0.4);
+    }
+
+    #accuracy-dot {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      background: gray;
+      flex-shrink: 0;
+    }
+  </style>
+</head>
+
+<body>
+
+  <!-- شارة دقة GPS -->
+  <div id="accuracy-badge">
+    <div id="accuracy-dot"></div>
+    <span id="accuracy-text">⏳ جارٍ الاتصال...</span>
+  </div>
+
+  <!-- حاوية الخريطة -->
+  <div id="map"></div>
+
+  <!-- ربط Leaflet JS محليًا و Socket.io -->
+  <script src="leaflet/leaflet.js"></script>
+  <script src="https://cdn.socket.io/4.8.3/socket.io.min.js"></script>
+
+  <script>
+
+    // إنشاء الخريطة
+    const map = L.map('map').setView([18.0858, -15.9785], 13);
+
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      maxZoom: 19
+    }).addTo(map);
+
+    // تعريف أيقونة مخصصة للماركرات
+    const customIcon = L.icon({
+      iconUrl: 'bluePoint.png',
+      iconSize: [40, 55],
+      iconAnchor: [20, 55],
+      popupAnchor: [0, -55]
+    });
+
+    // معرف المستخدم — يُخزَّن في localStorage ليبقى نفسه عند إعادة الاتصال
+    let userId = localStorage.getItem('trafficUserId');
+    if (!userId) {
+      userId = Math.random().toString(36).substring(2, 9);
+      localStorage.setItem('trafficUserId', userId);
+    }
+
+    // تخزين الماركرات
+    const markers = new Map();
+    let accuracyCircle = null;
+    let testMarker = null;
+    let lastAccuracy = null;
+
+    // ─── تحديث شارة الحالة ────────────────────────────────────
+    function updateBadge() {
+      const dot = document.getElementById('accuracy-dot');
+      const txt = document.getElementById('accuracy-text');
+      if (!socketReady) {
+        dot.style.background = '#ef4444';
+        txt.textContent = '❌ لا يوجد اتصال بالسيرفر';
+        return;
+      }
+      if (lastAccuracy === null) {
+        dot.style.background = '#6b7280';
+        txt.textContent = '⏳ في انتظار GPS...';
+        return;
+      }
+      if (lastAccuracy < 50) {
+        dot.style.background = '#22c55e';
+        txt.textContent = `📡 GPS دقيق: ${Math.round(lastAccuracy)} متر`;
+      } else if (lastAccuracy < 300) {
+        dot.style.background = '#f59e0b';
+        txt.textContent = `📡 دقة مقبولة: ${Math.round(lastAccuracy)} متر`;
+      } else {
+        dot.style.background = '#6b7280';
+        txt.textContent = `⚠️ دقة ضعيفة: ${Math.round(lastAccuracy)} متر (موقع تقريبي)`;
+      }
+    }
+
+    // ─── اتصال Socket.IO ──────────────────────────────────────
+    // الجوال: يتصل عبر HTTPS (منفذ 3443) لأن GPS يشترط HTTPS
+    // الكمبيوتر عبر localhost: يتصل عبر HTTP (منفذ 3000)
+
+    const host = window.location.hostname;
+    let serverUrl = "http://" + host + ":3000";
+    
+    console.log("🔗 Connecting to:", serverUrl);
+
+    // إنشاء Socket.IO
+    const socket = io(serverUrl);
+
+    let socketReady = false;
+    let userPositionReceived = false;
+
+    socket.on("connect", () => {
+      socketReady = true;
+      console.log("✅ Connected to server with ID:", userId);
+      updateBadge(); // تحديث الشارة عند الاتصال
+    });
+
+    socket.on("disconnect", () => {
+      socketReady = false;
+      console.warn("⚠️ Disconnected from server");
+      const dot = document.getElementById('accuracy-dot');
+      const txt = document.getElementById('accuracy-text');
+      dot.style.background = '#ef4444';
+      txt.textContent = '❌ انقطع الاتصال بالسيرفر';
+    });
+
+    socket.on("connect_error", (error) => {
+      console.error("❌ Socket.IO Error:", error);
+      const dot = document.getElementById('accuracy-dot');
+      const txt = document.getElementById('accuracy-text');
+      dot.style.background = '#ef4444';
+      txt.textContent = '❌ فشل الاتصال — تحقق من الشبكة';
+    });
+
+    // استقبال البيانات من السيرفر
+    socket.on("update", (users) => {
+      console.log("📍 Received users update:", users.length, "users");
+
+      // مجموعة IDs الموجودين حالياً في القائمة
+      const activeIds = new Set(users.map(u => u.id));
+      
+      
+      // حذف ماركرات المستخدمين الذين غادروا
+      for (const [id, marker] of markers) {
+        if (!activeIds.has(id)) {
+          map.removeLayer(marker);
+          markers.delete(id);
+          console.log(`🗑️ Removed marker for disconnected user: ${id}`);
+        }
+      }
+
+      // إضافة أو تحريك ماركرات المستخدمين الحاليين
+      users.forEach(user => {
+        console.log(`   User: ${user.id} at LAT=${user.lat.toFixed(6)}, LNG=${user.lng.toFixed(6)}`);
+
+        if (!markers.has(user.id)) {
+          const position = [user.lat, user.lng];
+
+          const marker = L.marker(position, { icon: customIcon }).addTo(map);
+          marker.bindPopup(`ID: ${user.id}<br/>LAT: ${user.lat.toFixed(6)}<br/>LNG: ${user.lng.toFixed(6)}`);
+          markers.set(user.id, marker);
+
+          if (user.id === userId && !userPositionReceived) {
+            userPositionReceived = true;
+            map.setView(position, 17);
+          }
+        } else {
+          // تحريك الماركر إلى الموقع الجديد
+          markers.get(user.id).setLatLng([user.lat, user.lng]);
+          markers.get(user.id).setPopupContent(`ID: ${user.id}<br/>LAT: ${user.lat.toFixed(6)}<br/>LNG: ${user.lng.toFixed(6)}`);
+        }
+      });
+    });
+
+    socket.on("warning", (data) => {
+      alert(`${data.message} المسافة: ${Math.round(data.distance)} متر`);
+    });
+
+    // دالة لإرسال الموقع
+    function sendPosition(lat, lng) {
+      if (socketReady) {
+        console.log(`📤 Sending position: LAT=${lat.toFixed(6)}, LNG=${lng.toFixed(6)}`);
+        socket.emit("positionUpdate", {
+          id: userId,
+          lat,
+          lng
+        });
+      } else {
+        console.warn("⚠️ Socket not ready, retrying in 1 second...");
+        setTimeout(() => sendPosition(lat, lng), 1000);
+      }
+    }
+
+    // إرسال الموقع كل ثانية
+    if (navigator.geolocation) {
+
+      const options = {
+        enableHighAccuracy: true,  // إجبار استخدام GPS الحقيقي وليس IP
+        timeout: 10000,            // انتظر 10 ثوانٍ كحد أقصى
+        maximumAge: 0              // لا تستخدم موقعاً مخزناً قديماً
+      };
+
+      navigator.geolocation.watchPosition((position) => {
+
+        const lat = position.coords.latitude;
+        const lng = position.coords.longitude;
+        const accuracy = position.coords.accuracy; // في متر
+
+        console.log(`🎯 Got position from GPS: LAT=${lat.toFixed(6)}, LNG=${lng.toFixed(6)}, ACCURACY=${accuracy.toFixed(0)}m`);
+
+        // ── تحديث شارة الدقة ──────────────────────────────────
+        lastAccuracy = accuracy;
+        updateBadge();
+
+        // ── لا نمنع أي موقع — نُرسل دائماً ونُظهر جودة الدقة فقط ──
+
+        // رسم دائرة تمثل دقة GPS (باللون الأزرق)
+        if (accuracyCircle) {
+          map.removeLayer(accuracyCircle);
+        }
+        accuracyCircle = L.circle([lat, lng], {
+          radius: accuracy,
+          color: 'blue',
+          fillColor: '#30b0ff',
+          fillOpacity: 0.1,
+          weight: 2
+        }).addTo(map);
+
+        // Add red test marker at your exact GPS location
+        if (testMarker) {
+          map.removeLayer(testMarker);
+        }
+        testMarker = L.marker([lat, lng], {
+          icon: L.icon({
+            iconUrl: 'data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMjQiIGhlaWdodD0iMjQiIHZpZXdCb3g9IjAgMCAyNCAyNCIgZmlsbD0ibm9uZSIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj48Y2lyY2xlIGN4PSIxMiIgY3k9IjEyIiByPSI5IiBmaWxsPSJyZWQiIHN0cm9rZT0id2hpdGUiIHN0cm9rZS13aWR0aD0iMiIvPjwvc3ZnPg==',
+            iconSize: [24, 24],
+            iconAnchor: [12, 12]
+          })
+        }).bindPopup(`📍 GPS TEST<br/>LAT: ${lat.toFixed(6)}<br/>LNG: ${lng.toFixed(6)}`).addTo(map);
+
+        console.log(`🔴 RED TEST MARKER placed at [${lat.toFixed(6)}, ${lng.toFixed(6)}]`);
+
+        sendPosition(lat, lng);
+
+      }, (error) => {
+        console.error("❌ GPS error:", error.message, "Code:", error.code);
+
+        // الخطأ الأساسي: المتصفح يستخدم IP بدلاً من GPS
+        if (error.code === error.PERMISSION_DENIED) {
+          alert("⚠️ يرجى تفعيل خدمة تحديد الموقع في المتصفح والسماح للموقع\n\nإذا كنت على كمبيوتر:\n- قد يستخدم المتصفح IP موقعك (غير دقيق)\n- اختبر من هاتف حقيقي للحصول على دقة GPS\n- اخرج إلى الشرفة أو الشارع");
+        } else if (error.code === error.POSITION_UNAVAILABLE) {
+          alert("⚠️ لم يتمكن المتصفح من الحصول على موقعك\n\nتأكد من:\n- تفعيل GPS في الهاتف\n- السماح للمتصفح بالوصول إلى الموقع\n- أنك في منطقة مفتوحة (خارج المبنى)");
+        } else {
+          alert("⚠️ انتظر طويلاً جداً، تحقق من اتصالك بالإنترنت");
+        }
+
+        
+
+        console.warn(`⚠️ Fallback position: LAT=${testLat.toFixed(6)}, LNG=${testLng.toFixed(6)}`);
+
+        // أرسل الموقع الافتراضي بشكل متكرر للاختبار
+        setInterval(() => {
+          sendPosition(testLat, testLng);
+        }, 1000);
+      }, options);
+
+    } else {
+      alert("GPS غير مدعوم في هذا المتصفح");
+    }
+
+  </script>
+
+
+</body>
+
+</html>
