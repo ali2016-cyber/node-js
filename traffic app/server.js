@@ -1,44 +1,21 @@
 const express = require("express");
 const { Server } = require("socket.io");
-const path = require("path");
 const http = require("http");
-const https = require("https");
-const selfsigned = require("selfsigned");
-const os = require("os");
 
-// ─── App Setup ────────────────────────────────────────────────
 const app = express();
-
-// Serve the 'assets' folder at the root URL
-//app.use(express.static(path.join(__dirname, "assets")));
-
-// ─── Generate Self-Signed Certificate ─────────────────────────
-const attrs = [{ name: "commonName", value: "localhost" }];
-const pems = selfsigned.generate(attrs, { days: 365 });
-
-// ─── HTTP Server (port 3000) ───────────────────────────────────
 const httpServer = http.createServer(app);
 
-// ─── HTTPS Server (port 3443) ─────────────────────────────────
-const httpsServer = https.createServer(
-  { key: pems.private, cert: pems.cert },
-  app
-);
-
-// ─── Socket.IO on BOTH servers ────────────────────────────────
-const io = new Server({
+const io = new Server(httpServer, {
   cors: {
-    origin: "*", 
+    origin: "*",
     methods: ["GET", "POST"],
-    credentials: true // Add this
+    credentials: true
   },
-  allowEIO3: true // This helps if there is a version mismatch
+  allowEIO3: true
 });
-io.attach(httpServer);
-io.attach(httpsServer);
 
 // ─── In-memory user store ─────────────────────────────────────
-const users = new Map(); // id → { lat, lng, socket }
+const users = new Map();
 
 // ─── Haversine distance (meters) ──────────────────────────────
 function getDistance(lat1, lon1, lat2, lon2) {
@@ -56,19 +33,15 @@ function getDistance(lat1, lon1, lat2, lon2) {
 io.on("connection", (socket) => {
   console.log(`✅ User connected [${socket.id}] — total: ${users.size + 1}`);
 
-  // Send existing users to the newly connected client
   const snapshot = [...users.entries()].map(([id, u]) => ({ id, lat: u.lat, lng: u.lng }));
   socket.emit("update", snapshot);
 
-  // Handle location update from a client
   socket.on("positionUpdate", (data) => {
     if (!data || data.lat == null || data.lng == null || !data.id) return;
 
     users.set(data.id, { lat: data.lat, lng: data.lng, socket });
-
     console.log(`📍 ${data.id} → (${data.lat.toFixed(5)}, ${data.lng.toFixed(5)})`);
 
-    // Check proximity with all other users
     for (const [otherId, other] of users) {
       if (otherId === data.id) continue;
       const dist = getDistance(data.lat, data.lng, other.lat, other.lng);
@@ -79,19 +52,15 @@ io.on("connection", (socket) => {
       }
     }
 
-    // Broadcast all positions to every connected client
     const allUsers = [...users.entries()].map(([id, u]) => ({ id, lat: u.lat, lng: u.lng }));
     io.emit("update", allUsers);
   });
 
-  // Clean up when user disconnects
   socket.on("disconnect", () => {
     for (const [id, user] of users) {
       if (user.socket === socket) {
         users.delete(id);
         console.log(`❌ ${id} disconnected — remaining: ${users.size}`);
-
-        // Notify others that this user left
         const allUsers = [...users.entries()].map(([uid, u]) => ({ id: uid, lat: u.lat, lng: u.lng }));
         io.emit("update", allUsers);
         break;
@@ -100,29 +69,12 @@ io.on("connection", (socket) => {
   });
 });
 
-// ─── Get local IP ─────────────────────────────────────────────
-function getLocalIP() {
-  const nets = os.networkInterfaces();
-  for (const name of Object.keys(nets)) {
-    for (const net of nets[name]) {
-      if (net.family === "IPv4" && !net.internal) return net.address;
-    }
-  }
-  return "your-ip";
-}
+// ─── Health check (Railway needs this) ───────────────────────
+app.get("/", (req, res) => res.send("Traffic server is running ✅"));
 
-// ─── Start Servers ────────────────────────────────────────────
-const HTTP_PORT = 3000;
-const HTTPS_PORT = 3443;
-const ip = getLocalIP();
-
-httpServer.listen(HTTP_PORT, "0.0.0.0", () => {
-  console.log(`\n🚀 Server running!`);
-  console.log(`   HTTP  (PC only):  http://localhost:${HTTP_PORT}/map.html`);
-  console.log(`   HTTP  (network):  http://${ip}:${HTTP_PORT}/map.html`);
-});
-
-httpsServer.listen(HTTPS_PORT, "0.0.0.0", () => {
-  console.log(`   HTTPS (phone ✅): https://${ip}:${HTTPS_PORT}/map.html`);
-  console.log(`\n⚠️  On phone: accept the self-signed certificate warning to continue.\n`);
+// ─── Start ────────────────────────────────────────────────────
+// Railway injects PORT automatically — never hardcode it
+const PORT = process.env.PORT || 3000;
+httpServer.listen(PORT, "0.0.0.0", () => {
+  console.log(`🚀 Server running on port ${PORT}`);
 });
