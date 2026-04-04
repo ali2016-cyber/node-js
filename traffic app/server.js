@@ -27,7 +27,12 @@ const httpsServer = https.createServer(
 
 // ─── Socket.IO on BOTH servers ────────────────────────────────
 const io = new Server({
-  cors: { origin: "*", methods: ["GET", "POST"] }
+  cors: {
+    origin: "*", 
+    methods: ["GET", "POST"],
+    credentials: true // Add this
+  },
+  allowEIO3: true // This helps if there is a version mismatch
 });
 io.attach(httpServer);
 io.attach(httpsServer);
@@ -67,7 +72,7 @@ io.on("connection", (socket) => {
     for (const [otherId, other] of users) {
       if (otherId === data.id) continue;
       const dist = getDistance(data.lat, data.lng, other.lat, other.lng);
-      if (dist < 50) {
+      if (dist < 100) {
         const warning = { message: "سيارة قريبة!", distance: dist };
         socket.emit("warning", warning);
         other.socket.emit("warning", warning);
