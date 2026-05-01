@@ -15,7 +15,7 @@ const io = new Server(httpServer, {
 });
 
 // ─── In-memory user store ─────────────────────────────────────
-const users = new Map();
+const users = new Map(); // id → { lat, lng, speed, socket }
 
 // ─── Haversine distance (meters) ──────────────────────────────
 function getDistance(lat1, lon1, lat2, lon2) {
@@ -33,35 +33,76 @@ function getDistance(lat1, lon1, lat2, lon2) {
 io.on("connection", (socket) => {
   console.log(`✅ User connected [${socket.id}] — total: ${users.size + 1}`);
 
-  const snapshot = [...users.entries()].map(([id, u]) => ({ id, lat: u.lat, lng: u.lng }));
+  // Send existing users snapshot to the new client
+  const snapshot = [...users.entries()].map(([id, u]) => ({
+    id, lat: u.lat, lng: u.lng
+  }));
   socket.emit("update", snapshot);
 
+  // Handle position update from a client
   socket.on("positionUpdate", (data) => {
     if (!data || data.lat == null || data.lng == null || !data.id) return;
 
-    users.set(data.id, { lat: data.lat, lng: data.lng, socket });
-    console.log(`📍 ${data.id} → (${data.lat.toFixed(5)}, ${data.lng.toFixed(5)})`);
+    // Store position + speed
+    users.set(data.id, {
+      lat:    data.lat,
+      lng:    data.lng,
+      speed:  data.speed   || 0,
+      socket
+    });
+
+    console.log(`📍 ${data.id} → (${data.lat.toFixed(5)}, ${data.lng.toFixed(5)}) speed: ${(data.speed || 0).toFixed(1)} m/s`);
+
+    // Check proximity with all other users
+    let dangerDetected = false;
 
     for (const [otherId, other] of users) {
       if (otherId === data.id) continue;
+
       const dist = getDistance(data.lat, data.lng, other.lat, other.lng);
+
       if (dist < 100) {
-        const warning = { message: "سيارة قريبة!", distance: dist };
-        socket.emit("warning", warning);
-        other.socket.emit("warning", warning);
+        dangerDetected = true;
+
+        // ✅ Send warning to ME with the OTHER car's data
+        socket.emit("warning", {
+          distance:   dist,
+          otherLat:   other.lat,
+          otherLng:   other.lng,
+          otherSpeed: other.speed || 0
+        });
+
+        // ✅ Send warning to OTHER with MY data
+        other.socket.emit("warning", {
+          distance:   dist,
+          otherLat:   data.lat,
+          otherLng:   data.lng,
+          otherSpeed: data.speed || 0
+        });
       }
     }
 
-    const allUsers = [...users.entries()].map(([id, u]) => ({ id, lat: u.lat, lng: u.lng }));
+    // ✅ Tell this client they are safe (clears the notification)
+    if (!dangerDetected) {
+      socket.emit("safe");
+    }
+
+    // Broadcast all positions to every client
+    const allUsers = [...users.entries()].map(([id, u]) => ({
+      id, lat: u.lat, lng: u.lng
+    }));
     io.emit("update", allUsers);
   });
 
+  // Clean up on disconnect
   socket.on("disconnect", () => {
     for (const [id, user] of users) {
       if (user.socket === socket) {
         users.delete(id);
         console.log(`❌ ${id} disconnected — remaining: ${users.size}`);
-        const allUsers = [...users.entries()].map(([uid, u]) => ({ id: uid, lat: u.lat, lng: u.lng }));
+        const allUsers = [...users.entries()].map(([uid, u]) => ({
+          id: uid, lat: u.lat, lng: u.lng
+        }));
         io.emit("update", allUsers);
         break;
       }
@@ -69,11 +110,10 @@ io.on("connection", (socket) => {
   });
 });
 
-// ─── Health check (Railway needs this) ───────────────────────
+// ─── Health check ─────────────────────────────────────────────
 app.get("/", (req, res) => res.send("Traffic server is running ✅"));
 
 // ─── Start ────────────────────────────────────────────────────
-// Railway injects PORT automatically — never hardcode it
 const PORT = process.env.PORT || 3000;
 httpServer.listen(PORT, "0.0.0.0", () => {
   console.log(`🚀 Server running on port ${PORT}`);
