@@ -29,6 +29,7 @@ function getDistance(lat1, lon1, lat2, lon2) {
   return 2 * R * Math.asin(Math.sqrt(a));
 }
 
+
 // ─── Socket Events ────────────────────────────────────────────
 io.on("connection", (socket) => {
   console.log(`✅ User connected [${socket.id}] — total: ${users.size + 1}`);
