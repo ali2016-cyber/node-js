@@ -96,10 +96,10 @@ io.on("connection", (socket) => {
 
     // Send safe message to this client (clears the notification)
     if (!dangerDetected_5k) {
-      socket.emit("safe");
+      socket.emit("safe-5k");
 
     }else if (!dangerDetected) {
-      socket.emit("safe-5k");
+      socket.emit("safe-100m");
       
     }
 
@@ -159,11 +159,11 @@ io.on("connection", (socket) => {
 });
 });
 setInterval(() => {
-  const TEN_MINUTES = 10 * 60 * 1000;
+  const FIVE_MINUTES = 5 * 60 * 1000;
   const now = Date.now();
 
   for (const [id, pos] of lastPositions) {
-    if (now - pos.timestamp > TEN_MINUTES) {
+    if (now - pos.timestamp > FIVE_MINUTES) {
       lastPositions.delete(id);
       console.log(`🗑️ Position expirée supprimée: ${id}`);
     }
